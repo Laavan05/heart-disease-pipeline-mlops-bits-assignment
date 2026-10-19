@@ -221,6 +221,37 @@ def create_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     return ColumnTransformer(transformers=transformers, remainder="drop")
 
 
+def load_and_split_data(
+    filepath: str | Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """Load, clean, and stratify raw features for model selection.
+
+    Keeping the raw feature frames allows cross-validation pipelines to fit
+    imputers, scalers, and encoders independently inside each fold.
+
+    Args:
+        filepath: Path to the prepared CSV file.
+
+    Returns:
+        Raw training and test features, followed by their target labels.
+    """
+    data = clean_data(load_data(filepath))
+    X, y = split_features_target(data)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=DEFAULT_TEST_SIZE,
+        random_state=DEFAULT_RANDOM_STATE,
+        stratify=y,
+    )
+    LOGGER.info(
+        "Split data into %d training and %d test records",
+        len(X_train),
+        len(X_test),
+    )
+    return X_train, X_test, y_train, y_test
+
+
 def preprocess_data(
     filepath: str | Path,
 ) -> tuple[Any, Any, pd.Series, pd.Series, ColumnTransformer]:
@@ -244,21 +275,7 @@ def preprocess_data(
         ValueError: If data cleaning or stratified splitting is not possible.
     """
     LOGGER.info("Starting preprocessing for %s", filepath)
-    data = clean_data(load_data(filepath))
-    X, y = split_features_target(data)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=DEFAULT_TEST_SIZE,
-        random_state=DEFAULT_RANDOM_STATE,
-        stratify=y,
-    )
-    LOGGER.info(
-        "Split data into %d training and %d test records",
-        len(X_train),
-        len(X_test),
-    )
+    X_train, X_test, y_train, y_test = load_and_split_data(filepath)
 
     preprocessor = create_preprocessor(X_train)
     X_train_processed = preprocessor.fit_transform(X_train)

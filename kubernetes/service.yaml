@@ -5,9 +5,9 @@ metadata:
   labels:
     app: heart-disease-api
 spec:
-  # ClusterIP exposes the API inside the cluster; use port-forward for local
-  # access or add an Ingress when external access is required.
-  type: ClusterIP
+  # A cloud or local-cluster load-balancer implementation is required for an
+  # external address; port-forward remains available for local inspection.
+  type: LoadBalancer
   selector:
     app: heart-disease-api
   ports:

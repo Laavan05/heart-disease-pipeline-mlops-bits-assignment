@@ -16,8 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-and-train:
-    name: Lint, test, and train
+  ci:
+    name: Lint, test, train, and build image
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -41,22 +41,23 @@ jobs:
           python -m pip install -r requirements.txt
 
       # Fail the job if project Python sources do not pass Flake8.
-      - name: Run Flake8
-        run: python -m flake8 src app tests
+      - name: Run Flake8 lint checks
+        run: python -m flake8 --show-source --statistics src app tests
 
       # Run the complete automated test suite in verbose mode.
-      - name: Run pytest
-        run: python -m pytest -v
+      - name: Run unit tests with pytest
+        run: python -m pytest -v --tb=short -ra
 
       # Ensure the essential preprocessing, training, and API modules exist.
-      - name: Verify critical source files
+      - name: Verify required project files
         run: |
           test -f src/preprocess.py
           test -f src/train.py
           test -f app/main.py
+          test -f Dockerfile
 
       # Train the models and generate the preprocessor and model artifacts.
-      - name: Train models
+      - name: Train model and generate artifacts
         run: python src/train.py
 
       # Stop before artifact upload if training did not create expected files.
@@ -64,6 +65,43 @@ jobs:
         run: |
           test -s models/best_model.pkl
           test -s models/preprocessor.pkl
+
+      # Build the deployable API image with the freshly generated model artifacts.
+      - name: Build Docker image
+        run: docker build --progress=plain --tag heart-disease-api:ci .
+
+      # Start the image and exercise readiness and inference before passing CI.
+      - name: Smoke test Docker container
+        run: |
+          set -euo pipefail
+          container_name=heart-disease-api-ci
+          trap 'docker rm --force "$container_name" >/dev/null 2>&1 || true' EXIT
+          docker run --detach \
+            --name "$container_name" \
+            --publish 127.0.0.1:8000:8000 \
+            heart-disease-api:ci
+
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            docker logs "$container_name"
+            exit 1
+          fi
+
+          response="$(curl --fail --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"age":63,"sex":1,"cp":1,"trestbps":145,"chol":233,"fbs":1,"restecg":2,"thalach":150,"exang":0,"oldpeak":2.3,"slope":3,"ca":0,"thal":6}' \
+            http://127.0.0.1:8000/predict)"
+          printf '%s\n' "$response"
+          printf '%s' "$response" | python -c \
+            'import json,sys; result=json.load(sys.stdin); assert result["prediction"] in (0, 1); assert 0 <= result["probability"] <= 1'
 
       # Preserve trained models, metrics, and generated screenshots.
       - name: Upload model and screenshot artifacts

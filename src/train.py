@@ -1,5 +1,6 @@
 """Train and evaluate heart disease classifiers."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -21,9 +24,9 @@ from sklearn.metrics import (
 )
 
 if __package__:
-    from .preprocess import preprocess_data
+    from .preprocess import create_preprocessor, load_and_split_data
 else:
-    from preprocess import preprocess_data
+    from preprocess import create_preprocessor, load_and_split_data
 
 LOGGER = logging.getLogger(__name__)
 RANDOM_STATE = 42
@@ -32,6 +35,7 @@ DEFAULT_DATA_PATH = (
 )
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 SCREENSHOTS_DIR = Path(__file__).resolve().parents[1] / "screenshots"
+CV_SCORING = ("accuracy", "precision", "recall", "f1", "roc_auc")
 
 
 def train_model(model: Any, X_train: Any, y_train: pd.Series) -> Any:
@@ -130,6 +134,84 @@ def evaluate_model(
     return metrics, matrix, report
 
 
+def tune_candidate_models(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+) -> dict[str, GridSearchCV]:
+    """Tune candidate classifiers with leakage-safe stratified CV.
+
+    Each search contains the feature preprocessor so that imputers, scaling,
+    and encoding are fitted only on the training fold.
+    """
+    configurations: dict[str, tuple[Any, dict[str, list[Any]]]] = {
+        "Logistic Regression": (
+            LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
+            {"classifier__C": [0.1, 1.0, 10.0]},
+        ),
+        "Random Forest": (
+            RandomForestClassifier(random_state=RANDOM_STATE),
+            {
+                "classifier__n_estimators": [100, 200],
+                "classifier__max_depth": [None, 10],
+                "classifier__min_samples_leaf": [1, 2],
+            },
+        ),
+    }
+    cross_validator = StratifiedKFold(
+        n_splits=5,
+        shuffle=True,
+        random_state=RANDOM_STATE,
+    )
+    searches: dict[str, GridSearchCV] = {}
+
+    for model_name, (classifier, parameter_grid) in configurations.items():
+        pipeline = Pipeline(
+            steps=[
+                ("preprocessor", create_preprocessor(X_train)),
+                ("classifier", classifier),
+            ]
+        )
+        search = GridSearchCV(
+            estimator=pipeline,
+            param_grid=parameter_grid,
+            scoring=list(CV_SCORING),
+            refit="roc_auc",
+            cv=cross_validator,
+            n_jobs=1,
+            return_train_score=False,
+            error_score="raise",
+        )
+        LOGGER.info(
+            "Tuning %s with %d-fold stratified cross-validation",
+            model_name,
+            cross_validator.n_splits,
+        )
+        search.fit(X_train, y_train)
+        searches[model_name] = search
+        LOGGER.info(
+            "%s cross-validation selected %s with ROC-AUC %.4f",
+            model_name,
+            search.best_params_,
+            search.best_score_,
+        )
+
+    return searches
+
+
+def cross_validation_metrics(search: GridSearchCV) -> dict[str, float]:
+    """Return mean and standard deviation for the selected CV parameter set."""
+    best_index = search.best_index_
+    metrics: dict[str, float] = {}
+    for metric_name in CV_SCORING:
+        metrics[f"cv_{metric_name}_mean"] = float(
+            search.cv_results_[f"mean_test_{metric_name}"][best_index]
+        )
+        metrics[f"cv_{metric_name}_std"] = float(
+            search.cv_results_[f"std_test_{metric_name}"][best_index]
+        )
+    return metrics
+
+
 def save_model(model: Any, filepath: str | Path) -> Path:
     """Persist a fitted model with joblib.
 
@@ -199,10 +281,10 @@ def run_training(
 ) -> tuple[pd.DataFrame, str]:
     """Train, compare, and save two classifiers using the prepared dataset.
 
-    The shared preprocessing function cleans the data, makes a stratified
-    train/test split, fits preprocessing on training data only, transforms
-    both partitions, and saves the fitted preprocessor. The best classifier
-    is selected by ROC-AUC, with F1 score as the tie-breaker.
+    Candidate models are tuned with five-fold stratified cross-validation.
+    Preprocessing is fitted within each fold. The best model is selected by
+    mean cross-validation ROC-AUC, with mean cross-validation F1 as a
+    tie-breaker, and is evaluated once on the held-out test partition.
 
     Args:
         filepath: Path to the prepared input CSV.
@@ -212,30 +294,27 @@ def run_training(
         name.
     """
     LOGGER.info("Starting model training workflow for %s", filepath)
-    X_train, X_test, y_train, y_test, _ = preprocess_data(filepath)
-
-    models = {
-        "Logistic Regression": LogisticRegression(
-            random_state=RANDOM_STATE,
-            max_iter=1000,
-        ),
-        "Random Forest": RandomForestClassifier(
-            n_estimators=200,
-            random_state=RANDOM_STATE,
-        ),
-    }
+    X_train, X_test, y_train, y_test = load_and_split_data(filepath)
+    searches = tune_candidate_models(X_train, y_train)
 
     metric_rows: list[dict[str, Any]] = []
     fitted_models: dict[str, Any] = {}
-    for model_name, candidate in models.items():
-        fitted_model = train_model(candidate, X_train, y_train)
+    for model_name, search in searches.items():
+        fitted_model = search.best_estimator_
         metrics, matrix, report = evaluate_model(
             fitted_model,
             X_test,
             y_test,
         )
         fitted_models[model_name] = fitted_model
-        metric_rows.append({"model": model_name, **metrics})
+        metric_rows.append(
+            {
+                "model": model_name,
+                "best_params": json.dumps(search.best_params_, sort_keys=True),
+                **cross_validation_metrics(search),
+                **metrics,
+            }
+        )
 
         print(f"\n{model_name} classification report:\n{report}")
         figure_name = (
@@ -251,12 +330,15 @@ def run_training(
 
     metrics_df = pd.DataFrame(metric_rows)
     metrics_df = metrics_df.sort_values(
-        by=["roc_auc", "f1_score"],
+        by=["cv_roc_auc_mean", "cv_f1_mean"],
         ascending=False,
         kind="stable",
     ).reset_index(drop=True)
 
-    print("\nModel comparison (sorted by ROC-AUC, then F1 score):")
+    print(
+        "\nModel comparison (selected by CV ROC-AUC, then CV F1; "
+        "hold-out metrics shown separately):"
+    )
     print(
         metrics_df.to_string(
             index=False,
@@ -265,7 +347,15 @@ def run_training(
     )
 
     best_model_name = str(metrics_df.iloc[0]["model"])
-    save_model(fitted_models[best_model_name], MODELS_DIR / "best_model.pkl")
+    best_pipeline = fitted_models[best_model_name]
+    save_model(
+        best_pipeline.named_steps["classifier"],
+        MODELS_DIR / "best_model.pkl",
+    )
+    save_model(
+        best_pipeline.named_steps["preprocessor"],
+        MODELS_DIR / "preprocessor.pkl",
+    )
 
     metrics_path = MODELS_DIR / "model_metrics.csv"
     metrics_path.parent.mkdir(parents=True, exist_ok=True)

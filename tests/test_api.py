@@ -1,5 +1,6 @@
 """Endpoint tests for the FastAPI prediction service."""
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -57,6 +58,22 @@ def test_get_health_reports_loaded_artifacts(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "healthy"}
+
+
+def test_http_requests_are_logged(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log method, path, status, and duration for handled requests."""
+    caplog.set_level(logging.INFO, logger=api.LOGGER.name)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert any(
+        "HTTP GET /health status=200 duration_ms=" in record.message
+        for record in caplog.records
+    )
 
 
 def test_get_metrics_returns_prometheus_text(client: TestClient) -> None:

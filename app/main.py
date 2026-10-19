@@ -1,15 +1,17 @@
 """FastAPI application for heart disease prediction."""
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict
+from starlette.middleware.base import RequestResponseEndpoint
 
 LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +116,35 @@ def root() -> dict[str, str]:
         "health": "/health",
         "prediction": "/predict",
     }
+
+
+@app.middleware("http")
+async def log_http_requests(
+    request: Request,
+    call_next: RequestResponseEndpoint,
+) -> Response:
+    """Log each HTTP request with its status and processing duration."""
+    started_at = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        LOGGER.exception(
+            "HTTP %s %s failed",
+            request.method,
+            request.url.path,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    LOGGER.info(
+        "HTTP %s %s status=%d duration_ms=%.2f client=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        request.client.host if request.client else "unknown",
+    )
+    return response
 
 
 @app.get("/health")
