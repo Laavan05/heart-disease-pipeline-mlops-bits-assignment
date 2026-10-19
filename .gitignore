@@ -205,6 +205,11 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# MLOps project artifacts
+models/*.pkl
+mlruns/
+.vscode/
+
 # Ruff stuff:
 .ruff_cache/
 
