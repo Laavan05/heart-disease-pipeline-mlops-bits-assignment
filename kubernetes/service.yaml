@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: heart-disease-api
+  labels:
+    app: heart-disease-api
+spec:
+  # ClusterIP exposes the API inside the cluster; use port-forward for local
+  # access or add an Ingress when external access is required.
+  type: ClusterIP
+  selector:
+    app: heart-disease-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

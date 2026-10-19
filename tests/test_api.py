@@ -59,6 +59,16 @@ def test_get_health_reports_loaded_artifacts(client: TestClient) -> None:
     assert response.json() == {"status": "healthy"}
 
 
+def test_get_metrics_returns_prometheus_text(client: TestClient) -> None:
+    """Expose request instrumentation in Prometheus text format."""
+    client.get("/")
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+    assert "http_requests_total" in response.text
+
+
 def test_post_predict_returns_valid_prediction(client: TestClient) -> None:
     """Return class, label, and probability for a valid request."""
     response = client.post("/predict", json=SAMPLE_REQUEST)

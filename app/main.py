@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict
 
 LOGGER = logging.getLogger(__name__)
@@ -100,6 +101,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Keep metrics available for monitoring without adding the endpoint to Swagger.
+Instrumentator().instrument(app).expose(app, include_in_schema=False)
 
 
 @app.get("/")
